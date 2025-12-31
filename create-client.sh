@@ -1,28 +1,38 @@
 #!/bin/bash
 
-# Diretório da CA (relativo ao local de execução do script)
+# Diretório raiz da CA
 CA_DIR="./DelcoreCA"
 
-# Define o nome da CA
-CA_NAME="delcore"
+# Pastas de destino dentro da CA
+CLIENTS_DIR="$CA_DIR/clients"
+ISSUED_DIR="$CA_DIR/issued"
 
 if [ ! -f "$CA_DIR/ca.conf" ]; then
   echo "Erro: Não encontrei a configuração da CA em $CA_DIR/ca.conf"
-  echo "Certifique-se de que a CA foi criada com o script create_root_ca.sh"
+  echo "Execute primeiro o script create_root_ca.sh"
   exit 1
 fi
 
 if [ -z "$1" ]; then
   echo "Uso: $0 nome-do-cliente [email:usuario@exemplo.com]"
-  echo "Exemplo: $0 joao joao@exemplo.com"
+  echo "Exemplo: $0 joao joao@delcore.com"
   exit 1
 fi
 
-CLIENT_NAME=$1
-EMAIL=$2
+CLIENT_NAME="$1"
+EMAIL="$2"
 
-# Arquivo de configuração temporário para o cliente
-CLIENT_CONF="$CLIENT_NAME.conf"
+# Sufixo para evitar conflitos e identificar origem
+CA_SUFFIX="delcore"
+
+# Nome base dos arquivos
+BASE_NAME="${CLIENT_NAME}-${CA_SUFFIX}"
+
+# Cria pastas de destino, se não existirem
+mkdir -p "$CLIENTS_DIR" "$ISSUED_DIR"
+
+# Config temporária (será removida no final)
+CLIENT_CONF="/tmp/${BASE_NAME}.conf"
 
 cat <<EOF > "$CLIENT_CONF"
 [ req ]
@@ -43,49 +53,69 @@ extendedKeyUsage    = clientAuth
 EOF
 
 echo "Gerando certificado cliente para: $CLIENT_NAME"
+echo "Arquivos serão salvos em: $CLIENTS_DIR/"
 
-# 1. Gera chave privada do cliente
-openssl genrsa -out "$CLIENT_NAME-$CA_NAME.key" 2048
+# 1. Gera chave privada
+openssl genrsa -out "$CLIENTS_DIR/${BASE_NAME}.key" 2048 || { echo "Erro ao gerar chave"; exit 1; }
 
-# 2. Gera CSR (Certificate Signing Request)
-openssl req -new -key "$CLIENT_NAME-$CA_NAME.key" -out "$CLIENT_NAME-$CA_NAME.csr" -config "$CLIENT_CONF"
+# 2. Gera CSR
+openssl req -new -key "$CLIENTS_DIR/${BASE_NAME}.key" -out "/tmp/${BASE_NAME}.csr" -config "$CLIENT_CONF" || { echo "Erro ao gerar CSR"; exit 1; }
 
-# 3. Assina o certificado com a CA raiz (será solicitada a senha da CA)
+# 3. Assina com a CA raiz
 openssl ca -config "$CA_DIR/ca.conf" \
     -extensions usr_cert \
     -days 730 \
     -notext \
     -md sha256 \
-    -in "$CLIENT_NAME-$CA_NAME.csr" \
-    -out "$CLIENT_NAME-$CA_NAME.crt"
+    -in "/tmp/${BASE_NAME}.csr" \
+    -out "$CLIENTS_DIR/${BASE_NAME}.crt"
 
-# 4. Exporta para formato PKCS#12 (.p12) – ideal para importar em navegadores e apps
+if [ $? -ne 0 ]; then
+  echo "Erro ao assinar o certificado. Verifique a senha da CA."
+  rm -f "/tmp/${BASE_NAME}.csr" "$CLIENT_CONF"
+  exit 1
+fi
+
+# 4. Cópia do certificado público para pasta de emitidos (opcional, útil para distribuição)
+cp "$CLIENTS_DIR/${BASE_NAME}.crt" "$ISSUED_DIR/"
+
+# 5. Exporta para PKCS#12 (.p12) – arquivo principal para o usuário final
 echo "Exportando para PKCS#12 (.p12)..."
 openssl pkcs12 -export \
-    -out "$CLIENT_NAME-$CA_NAME.p12" \
-    -inkey "$CLIENT_NAME-$CA_NAME.key" \
-    -in "$CLIENT_NAME-$CA_NAME.crt" \
-    -certfile "$CA_DIR/ca/certs/DelcoreCA.cert.pem" \
-    -name "$CLIENT_NAME"
+    -out "$CLIENTS_DIR/${BASE_NAME}.p12" \
+    -inkey "$CLIENTS_DIR/${BASE_NAME}.key" \
+    -in "$CLIENTS_DIR/${BASE_NAME}.crt" \
+    -certfile "$CA_DIR/ca/certs/ca.cert.pem" \
+    -name "$CLIENT_NAME" \
+    -passout pass:   # usuário define senha ao importar (mais prático)
 
-# 5. Limpeza de arquivos intermediários
-rm "$CLIENT_NAME-$CA_NAME.csr" "$CLIENT_CONF"
+if [ $? -ne 0 ]; then
+  echo "Erro ao exportar .p12"
+  exit 1
+fi
 
-# 6. Define permissões seguras
-chmod 400 "$CLIENT_NAME-$CA_NAME.key"
-chmod 444 "$CLIENT_NAME-$CA_NAME.crt" "$CLIENT_NAME-$CA_NAME.p12"
+# 6. Limpeza de arquivos temporários
+rm -f "/tmp/${BASE_NAME}.csr" "$CLIENT_CONF"
+
+# 7. Permissões seguras
+chmod 400 "$CLIENTS_DIR/${BASE_NAME}.key"          # só leitura para owner
+chmod 444 "$CLIENTS_DIR/${BASE_NAME}.crt"          # legível por todos
+chmod 444 "$CLIENTS_DIR/${BASE_NAME}.p12"          # legível por todos
+chmod 444 "$ISSUED_DIR/${BASE_NAME}.crt"
 
 echo ""
 echo "=================================================================="
 echo "Certificado cliente gerado com sucesso!"
 echo ""
-echo "Arquivos criados:"
-echo "  • $CLIENT_NAME-$CA_NAME.key   → Chave privada (mantenha extremamente segura!)"
-echo "  • $CLIENT_NAME-$CA_NAME.crt   → Certificado público"
-echo "  • $CLIENT_NAME-$CA_NAME.p12   → Pacote para importação em navegadores/apps"
+echo "Arquivos salvos em: $CLIENTS_DIR/"
+echo "  • ${BASE_NAME}.key   → Chave privada (mantenha em local seguro!)"
+echo "  • ${BASE_NAME}.crt   → Certificado público"
+echo "  • ${BASE_NAME}.p12   → Arquivo para entregar ao usuário final"
 echo ""
-echo "Instruções para o usuário final:"
-echo "  - Importe o arquivo $CLIENT_NAME-$CA_NAME.p12 no navegador ou aplicativo."
-echo "  - Será solicitada uma senha de exportação (defina uma forte ao importar)."
-echo "  - Após importado, o navegador usará automaticamente esse certificado ao acessar sites com mTLS."
+echo "Cópia pública também em: $ISSUED_DIR/${BASE_NAME}.crt"
+echo ""
+echo "Instruções para o usuário:"
+echo "  - Entregue apenas o arquivo ${BASE_NAME}.p12"
+echo "  - Peça para importar no navegador/sistema operacional"
+echo "  - Definir uma senha forte durante a importação"
 echo "=================================================================="

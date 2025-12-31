@@ -84,3 +84,4 @@ echo "  - Distribua o DelcoreCA.cert.pem para os clientes que precisarão confia
 echo "  - Use os outros scripts (create_server_cert.sh e create_client_cert.sh)"
 echo "    ajustando os caminhos para apontar para $CA_DIR/ca.conf e $CA_DIR/ca/certs/DelcoreCA.cert.pem"
 echo ""
+echo "=================================================================="
